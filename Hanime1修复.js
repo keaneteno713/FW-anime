@@ -382,6 +382,8 @@ async function loadByGenre(params) {
 
 /**
  * 解析预览页 HTML
+ * @param {string} html - 预览页 HTML 内容
+ * @returns {Array} 解析后的视频项列表
  */
 function parsePreviewsHtml(html) {
     const $ = Widget.html.load(html);
@@ -390,7 +392,7 @@ function parsePreviewsHtml(html) {
     // 选择预览容器（移动端预览图区域）
     $('.hidden-sm.hidden-md.hidden-lg .preview-image-modal-trigger').each((i, el) => {
         const $img = $(el);
-        const poster = $img.attr('src') || $img.attr('data-src');
+        let poster = $img.attr('src') || $img.attr('data-src') || "";
         if (!poster) return;
 
         // 尝试从 alt 或父容器获取标题
@@ -407,17 +409,45 @@ function parsePreviewsHtml(html) {
         if (!title) title = "新番预告";
         if (title.length > 40) title = title.substring(0, 40) + "...";
 
-        // 预览页面本身没有播放地址，链接到预览页面
-        const link = window.location.href; // 当前预览页 URL
+        // 提取视频链接：查找最近的 a 标签
+        let link = "";
+        const $parentA = $img.closest('a');
+        if ($parentA.length) {
+            let href = $parentA.attr('href');
+            if (href) {
+                if (!href.startsWith('http')) {
+                    href = BASE_URL + (href.startsWith('/') ? '' : '/') + href;
+                }
+                link = href;
+            }
+        }
+        // 如果没有找到链接，尝试其他方法：比如查找 data-href
+        if (!link) {
+            const $parentWithData = $img.closest('[data-href]');
+            if ($parentWithData.length) {
+                let dataHref = $parentWithData.attr('data-href');
+                if (dataHref) {
+                    if (!dataHref.startsWith('http')) {
+                        dataHref = BASE_URL + (dataHref.startsWith('/') ? '' : '/') + dataHref;
+                    }
+                    link = dataHref;
+                }
+            }
+        }
+
+        // 如果仍然没有链接，则跳过该项（无法播放）
+        if (!link) return;
+
+        // 标准化图片链接
+        poster = normalizeImageUrl(poster);
 
         items.push({
             id: link,
             type: "url",
             title: title,
-            posterPath: normalizeImageUrl(poster),
-            backdropPath: normalizeImageUrl(poster),
+            posterPath: poster,
+            backdropPath: poster,
             mediaType: "movie",
-            description: "新番预告",
             link: link
         });
     });
@@ -425,122 +455,19 @@ function parsePreviewsHtml(html) {
     return items;
 }
 
+/**
+ * 加载新番预告模块
+ * @param {Object} params - 参数对象（此模块无参数）
+ * @returns {Array} 视频项列表
+ */
 async function loadPreviews(params) {
-    const d = new Date();
-    const year = d.getFullYear();
-    let month = d.getMonth() + 1;
-    if (month < 10) month = '0' + month;
-
-    const url = `${BASE_URL}/previews/${year}${month}`;
-
+    // 根据网站实际结构，预览页可能位于 /preview 或 /new，请根据情况调整
+    const previewUrl = `${BASE_URL}/preview`; // 如果不对，请修改为正确路径
     try {
-        const response = await httpGetWithTimeout(url);
+        const response = await httpGetWithTimeout(previewUrl);
         return parsePreviewsHtml(response.data);
     } catch (e) {
-        console.error("Preview load failed", e);
+        console.error("加载预览失败:", e);
         return [];
-    }
-}
-
-// --- 详情加载 ---
-
-async function loadDetail(link) {
-    try {
-        const response = await httpGetWithTimeout(link);
-        const $ = Widget.html.load(response.data);
-
-        // 尝试获取多个清晰度的视频 URL
-        let videoUrl = "";
-        const qualityIds = ['#video-sd', '#video-hd', '#video-720p', '#video-1080p'];
-        for (const id of qualityIds) {
-            const val = $(id).val();
-            if (val) {
-                videoUrl = val;
-                break;
-            }
-        }
-
-        // 如果 input 中没有，尝试正则匹配
-        if (!videoUrl) {
-            const match = response.data.match(/source\s*=\s*['"](https:\/\/[^'"]+)['"]/);
-            if (match) videoUrl = match[1];
-        }
-
-        // 尝试 video 标签
-        if (!videoUrl) {
-            videoUrl = $('video source').attr('src');
-        }
-
-        if (!videoUrl) {
-            throw new Error("video_url_not_found");
-        }
-
-        videoUrl = videoUrl.replace(/&amp;/g, '&');
-
-        const title = $('meta[property="og:title"]').attr('content') || "标题未知";
-        const desc = $('meta[property="og:description"]').attr('content') || "";
-        const cover = $('meta[property="og:image"]').attr('content') || "";
-
-        // 解析推荐视频（从详情页底部）
-        const childItems = [];
-        $('.home-rows-videos-div a[href*="/watch?v="]').each((i, el) => {
-            if (i >= 10) return false; // 限制推荐数量
-
-            const $a = $(el);
-            let recLink = $a.attr('href');
-            if (!recLink) return;
-            if (!recLink.startsWith('http')) {
-                recLink = BASE_URL + (recLink.startsWith('/') ? '' : '/') + recLink;
-            }
-
-            const $img = $a.find('img').first();
-            let recPoster = $img.attr('data-src') || $img.attr('src') || "";
-            recPoster = normalizeImageUrl(recPoster);
-
-            let recTitle = $a.find('.home-rows-videos-title, [class*="title"]').first().text().trim();
-            if (!recTitle) recTitle = $img.attr('alt') || "相关视频";
-
-            childItems.push({
-                id: recLink,
-                type: "url",
-                title: recTitle,
-                posterPath: recPoster,
-                backdropPath: recPoster,
-                mediaType: "movie",
-                link: recLink
-            });
-        });
-
-        return {
-            id: link,
-            type: "detail",
-            videoUrl: videoUrl,
-            title: title,
-            description: desc,
-            posterPath: normalizeImageUrl(cover),
-            backdropPath: normalizeImageUrl(cover),
-            mediaType: "movie",
-            link: link,
-            childItems: childItems,
-            headers: getCommonHeaders()
-        };
-
-    } catch (error) {
-        console.error("Detail load error:", error);
-        // 用户友好提示
-        let errorMsg = "无法加载视频，请重试。";
-        if (error.message === "video_url_not_found") {
-            errorMsg = "未找到视频地址，可能需登录或该视频已失效。";
-        }
-        return {
-            id: link,
-            type: "detail",
-            videoUrl: link, // 让 App 尝试打开网页
-            title: "加载失败",
-            description: errorMsg,
-            posterPath: "",
-            mediaType: "movie",
-            link: link
-        };
     }
 }
